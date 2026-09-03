@@ -1,0 +1,34 @@
+[package]
+name = "catflix-entitlements"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+freenet-stdlib = { version = "0.8.5", features = ["contract"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["std"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# The `#[contract]` macro emits the four exported wasm symbols behind
+# `#[cfg(feature = "freenet-main-contract")]`. Without this block the crate
+# compiles cleanly, produces a .wasm, and exports NOTHING -- the failure is a
+# handful of dead-code warnings, which is exactly what it looked like here.
+[features]
+default = ["freenet-main-contract"]
+freenet-main-contract = []
+contract = ["freenet-stdlib/contract"]
+trace = ["freenet-stdlib/trace"]

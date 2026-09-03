@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""catflix — everything you need to run this and buy from it.
+
+The pieces underneath (build.sh, the gatekeeper, fdev, a wallet in another
+directory) each do one job and each want different arguments. This is the front
+door, so that ordering a portrait and unlocking it is a thing somebody can do
+without first learning which of five programs owns which half of it.
+
+    ./catflix up          build everything and publish it; prints the URL
+    ./catflix serve       run the seller: watch the chain, pay covered requests
+    ./catflix pay <ref>   pay an order reference from the demo wallet
+    ./catflix order <sku> mint an order OUTSIDE the browser, pay it, unlock it
+    ./catflix status      what has been sold
+    ./catflix url         where the site is
+    ./catflix check       every gate
+    ./catflix wallet      mint and fund the wallet `pay` spends from
+
+`order` exists because a published Freenet site runs in a sandbox that nothing
+can script -- see README. It does from the command line exactly what the page
+does in the browser, so the whole path can be exercised without a human, and
+prints the keyring line to paste in if you want the browser to show it too.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "gatekeeper"))
+
+import envelope as E  # noqa: E402
+import gatekeeper as G  # noqa: E402
+
+SITE_KEY = "catflix"
+# The payer of last resort. It is a wallet in this workspace, so it is the
+# MERCHANT's wallet no matter whose directory it sits in -- `pay` is a
+# convenience for exercising the path, not evidence that a stranger paid.
+WALLET = Path("~/Workstation/Business/Point of Sale/agent_wallet.py")
+AGENT = "catflix-e2e"
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, text=True, **kw)
+
+
+def config() -> dict:
+    path = ROOT / "site" / "config.json"
+    if not path.exists():
+        raise SystemExit("no site/config.json — run `./catflix up` first")
+    return json.loads(path.read_text())
+
+
+def site_url() -> str | None:
+    result = run(["fdev", "website", "list"], capture_output=True)
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == SITE_KEY:
+            return f"http://127.0.0.1:7509/v1/contract/web/{parts[1]}/"
+    return None
+
+
+def node_is_up() -> bool:
+    import socket
+    with socket.socket() as s:
+        s.settimeout(2)
+        return s.connect_ex(("127.0.0.1", 7509)) == 0
+
+
+# ---------------------------------------------------------------------------
+
+
+def cmd_up(args) -> None:
+    if not (ROOT / "keys" / "gatekeeper.ed25519").exists():
+        print("no gatekeeper key yet — minting one")
+        run([sys.executable, "gatekeeper/gatekeeper.py", "init"], cwd=ROOT, check=True)
+    if not node_is_up():
+        raise SystemExit(
+            "no Freenet node on 127.0.0.1:7509.\n"
+            "  start one with:  freenet local --ws-api-address 127.0.0.1"
+        )
+
+    print("\n--- building ---")
+    if run(["./build.sh"], cwd=ROOT).returncode != 0:
+        raise SystemExit("build failed")
+
+    cfg = config()
+    wasm = "contract/target/wasm32-unknown-unknown/release/catflix_entitlements.wasm"
+    queue_wasm = "contract-requests/target/wasm32-unknown-unknown/release/catflix_requests.wasm"
+
+    print("\n--- publishing contracts ---")
+    # `put` on a contract the node already holds is harmless, so this is safe
+    # to re-run. The initial state is only adopted for a contract that is new.
+    (ROOT / "keys" / "initial-state.json").write_text('{"v":1,"entitlements":[]}')
+    (ROOT / "keys" / "initial-queue.json").write_text('{"v":1,"refs":[]}')
+    run(["fdev", "execute", "put", "--code", wasm, "--parameters", "keys/params.bin",
+         "contract", "--state", "keys/initial-state.json"], cwd=ROOT, capture_output=True)
+    print(f"  entitlements  {cfg['contract']}")
+    run(["fdev", "execute", "put", "--code", queue_wasm,
+         "contract", "--state", "keys/initial-queue.json"], cwd=ROOT, capture_output=True)
+    print(f"  requests      {cfg['requests']}")
+
+    print("\n--- publishing the site ---")
+    listed = site_url()
+    verb = "update" if listed else "publish"
+    if not listed:
+        run(["fdev", "website", "init", SITE_KEY], cwd=ROOT, capture_output=True)
+    result = run(["fdev", "website", verb, "./site", "--key", SITE_KEY],
+                 cwd=ROOT, capture_output=True)
+    if result.returncode != 0:
+        raise SystemExit(f"publishing the site failed:\n{result.stderr[-1200:]}")
+
+    print(f"\n  {site_url()}\n")
+    print("next:  ./catflix serve      (in another terminal — the seller must be running)")
+    print("       ./catflix order t3   (buy one portrait without a browser)")
+
+
+def cmd_serve(args) -> None:
+    cfg = config()
+    print(f"seller running. entitlements {cfg['contract'][:12]}...  queue {cfg['requests'][:12]}...")
+    print(f"tariff: {G.PRICE_MICROXTR_PER_TITLE:,} uXTR a portrait, "
+          f"{G.PRICE_MICROXTR_PER_DAY * 30:,} uXTR all-access/30d")
+    print("ctrl-c to stop\n")
+    while True:
+        run([sys.executable, "gatekeeper/gatekeeper.py", "watch", "--once",
+             "--contract", cfg["contract"]], cwd=ROOT)
+        if not args.no_cover:
+            run([sys.executable, "gatekeeper/gatekeeper.py", "cover",
+                 "--queue", cfg["requests"], "--max", str(args.max_cover),
+                 "--agent", args.agent, "--wallet", str(WALLET)], cwd=ROOT)
+        if args.once:
+            return
+        time.sleep(args.interval)
+
+
+def cmd_pay(args) -> None:
+    reference = args.reference
+    try:
+        _, sku = G.parse_reference(reference)
+        G.titles_for(sku)
+    except G.Refusal as refusal:
+        raise SystemExit(f"that is not a payable Catflix reference: {refusal}")
+    amount = G.price_of(sku)
+
+    if not WALLET.exists():
+        raise SystemExit(f"no wallet at {WALLET} — run `./catflix wallet` or pay by hand:\n"
+                         f"  amount {amount} uXTR to {G.COMPONENT} naming {reference}")
+
+    print(f"paying {amount:,} uXTR for {sku} — {reference}")
+    result = run([sys.executable, str(WALLET), "pay", args.agent, G.COMPONENT,
+                  str(amount), reference], cwd=WALLET.parent, capture_output=True)
+    print(result.stdout.strip() or result.stderr.strip()[:600])
+    if result.returncode != 0:
+        raise SystemExit("the wallet refused. `./catflix wallet` mints and funds one.")
+
+
+def cmd_order(args) -> None:
+    """Do what the page does, from a terminal: mint a key, pay, wait, decrypt."""
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    cfg = config()
+    try:
+        titles = G.titles_for(args.sku)
+    except G.Refusal as refusal:
+        skus = ", ".join(t["sku"] for t in G.catalogue())
+        raise SystemExit(f"{refusal}\n  try: all, {skus}")
+
+    sk = X25519PrivateKey.generate()
+    pub = sk.public_key().public_bytes_raw()
+    reference = f"CF1.{E.b64(pub)}.{args.sku}.{E.b64(os.urandom(9))}"
+    keyfile = ROOT / "keys" / f"order-{E.b64(pub)[:12]}.json"
+    keyfile.write_text(json.dumps({"priv": E.b64(sk.private_bytes_raw()),
+                                   "pub": E.b64(pub), "ref": reference, "sku": args.sku}))
+    keyfile.chmod(0o600)
+
+    print(f"ordering {args.sku}: {', '.join(titles)}")
+    print(f"  reference {reference}")
+    print(f"  key saved {keyfile.name}  (this file IS the purchase)")
+
+    cmd_pay(argparse.Namespace(reference=reference, agent=args.agent))
+
+    print("\nwaiting for the seller to issue…  (needs `./catflix serve` running,")
+    print("or run `./catflix serve --once` in another terminal)")
+    for attempt in range(args.wait // 5):
+        time.sleep(5)
+        state = read_contract(cfg["contract"])
+        mine = [e for e in state.get("entitlements", []) if e["sub"] == E.b64(pub)]
+        if mine:
+            bundle = json.loads(E.unseal(E.unb64(mine[0]["sealed"]), E.unb64(mine[0]["nonce"]),
+                                         E.unb64(mine[0]["eph"]), sk))
+            print(f"\nentitlement found (seq {mine[0]['seq']}). It opens "
+                  f"{len(bundle['grants'])} portrait(s):")
+            for title_id, grant in bundle["grants"].items():
+                kept = "kept" if grant["until"] == 0 else time.strftime(
+                    "until %Y-%m-%d", time.gmtime(grant["until"]))
+                print(f"  {title_id:<20} {kept}")
+            decrypt_all(bundle, ROOT / "unlocked")
+            print(f"\ndecrypted into {ROOT / 'unlocked'}/")
+            print("\nto see it in the browser, paste this into the site's console —")
+            print("or just click Order there instead; the page mints its own key:")
+            print(f"  (keyring file: {keyfile})")
+            return
+        print(f"  … not yet ({(attempt + 1) * 5}s)")
+    raise SystemExit("timed out. Is `./catflix serve` running?")
+
+
+def read_contract(contract: str) -> dict:
+    out = ROOT / "keys" / "state-read.json"
+    run(["fdev", "execute", "get", contract, "-o", str(out)], cwd=ROOT, capture_output=True)
+    body = out.read_text() if out.exists() else ""
+    return json.loads(body) if body.strip() else {"entitlements": []}
+
+
+def decrypt_all(bundle: dict, into: Path) -> None:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    into.mkdir(exist_ok=True)
+    for title in G.catalogue():
+        grant = bundle["grants"].get(title["id"])
+        if not grant:
+            continue
+        aad = b"catflix-title-v1" + title["id"].encode() + title["epoch"].to_bytes(4, "big")
+        plain = AESGCM(E.unb64(grant["key"])).decrypt(
+            E.unb64(title["nonce"]), (ROOT / "site" / title["enc"]).read_bytes(), aad)
+        (into / f"{title['id']}.webp").write_bytes(plain)
+        print(f"  decrypted {title['id']}.webp  ({len(plain):,} bytes)")
+
+
+def cmd_wallet(args) -> None:
+    if not WALLET.exists():
+        raise SystemExit(f"no wallet script at {WALLET}")
+    run([sys.executable, str(WALLET), "mint", args.agent], cwd=WALLET.parent)
+    run([sys.executable, str(WALLET), "fund", args.agent], cwd=WALLET.parent)
+    run([sys.executable, str(WALLET), "list"], cwd=WALLET.parent)
+
+
+def cmd_status(args) -> None:
+    run([sys.executable, "gatekeeper/gatekeeper.py", "status"], cwd=ROOT)
+
+
+def cmd_url(args) -> None:
+    url = site_url()
+    print(url or "not published yet — run `./catflix up`")
+
+
+def cmd_check(args) -> None:
+    raise SystemExit(run(["./check.sh"], cwd=ROOT).returncode)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="\n".join(__doc__.split("\n")[4:14]))
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("up", help="build and publish everything")
+    p.set_defaults(func=cmd_up)
+
+    p = sub.add_parser("serve", help="run the seller")
+    p.add_argument("--interval", type=int, default=15)
+    p.add_argument("--max-cover", type=int, default=2)
+    p.add_argument("--no-cover", action="store_true", help="do not pay for anybody")
+    p.add_argument("--agent", default=AGENT)
+    p.add_argument("--once", action="store_true")
+    p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("pay", help="pay an order reference")
+    p.add_argument("reference")
+    p.add_argument("--agent", default=AGENT)
+    p.set_defaults(func=cmd_pay)
+
+    p = sub.add_parser("order", help="mint, pay and unlock an order without a browser")
+    p.add_argument("sku", help="a title sku (t0..t8) or `all`")
+    p.add_argument("--agent", default=AGENT)
+    p.add_argument("--wait", type=int, default=180)
+    p.set_defaults(func=cmd_order)
+
+    p = sub.add_parser("wallet", help="mint and fund the demo payer")
+    p.add_argument("--agent", default=AGENT)
+    p.set_defaults(func=cmd_wallet)
+
+    for name, fn, helptext in [("status", cmd_status, "what has been sold"),
+                               ("url", cmd_url, "where the site is"),
+                               ("check", cmd_check, "run every gate")]:
+        p = sub.add_parser(name, help=helptext)
+        p.set_defaults(func=fn)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

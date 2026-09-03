@@ -1,0 +1,89 @@
+:root{
+  --bg:#0b0c10; --panel:#14161d; --line:#242833; --ink:#e9ecf2; --dim:#8b93a5;
+  --hot:#e50914; --ok:#39d98a; --warn:#f2b544;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1120px;margin:0 auto;padding:0 20px}
+header{border-bottom:1px solid var(--line);background:#0e1016;position:sticky;top:0;z-index:5}
+.head{display:flex;align-items:center;justify-content:space-between;padding:14px 20px}
+h1{margin:0;font-size:26px;letter-spacing:.22em;color:var(--hot);font-weight:800}
+h2{font-size:19px;margin:0 0 10px}
+h3{margin:0 0 8px;font-size:15px}
+
+.badge{font-size:12px;padding:5px 11px;border-radius:999px;border:1px solid var(--line);
+  color:var(--dim);white-space:nowrap}
+.badge.live{color:var(--ok);border-color:#1f5c41;background:#0e2419}
+.badge.lapsed{color:var(--warn);border-color:#5c4a1f}
+
+.status{margin:18px 0;padding:11px 14px;border-radius:8px;background:var(--panel);
+  border:1px solid var(--line);color:var(--dim);font-size:13.5px}
+.status.ok{color:var(--ok);border-color:#1f5c41}
+.status.warn{color:var(--warn);border-color:#5c4a1f}
+.status.waiting{color:var(--ink)}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:20px;margin:18px 0}
+.panel p{margin:0 0 10px;color:#c3cad6}
+.fine{font-size:12.5px;color:var(--dim)}
+.truth ul{margin:0 0 12px;padding-left:20px;color:#c3cad6}
+.truth li{margin-bottom:7px}
+
+button{font:inherit;cursor:pointer;border-radius:7px;border:1px solid var(--line);
+  background:#1d212b;color:var(--ink);padding:8px 14px}
+button:hover{background:#262b38}
+button.primary{background:var(--hot);border-color:var(--hot);font-weight:600;padding:10px 20px}
+button.primary:hover{background:#f6121d}
+
+.order{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.ref{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.ref code{flex:1;min-width:280px;background:#0b0d12;border:1px solid var(--line);
+  padding:9px 11px;border-radius:7px;font-size:12.5px;word-break:break-all}
+.amount{font-size:17px;font-weight:600;margin:12px 0 4px}
+pre{background:#0b0d12;border:1px solid var(--line);border-radius:7px;padding:12px;
+  overflow-x:auto;font-size:12.5px;color:#a9d3ff;margin:10px 0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:18px;margin:22px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden;
+  transition:transform .16s ease,border-color .16s ease}
+.card:hover{transform:translateY(-3px);border-color:#39405230}
+.art{position:relative;aspect-ratio:1;background:#0b0d12}
+.art img{width:100%;height:100%;object-fit:cover;display:block;
+  filter:saturate(.55) contrast(.9);transition:filter .4s ease}
+.card.revealed .art img{filter:none}
+.lock{position:absolute;right:9px;top:9px;font-size:17px;text-shadow:0 2px 6px #000}
+.card h3{margin:11px 12px 3px;font-size:14.5px}
+.meta{margin:0 12px;font-size:11.5px;color:var(--dim)}
+.syn{margin:7px 12px 13px;font-size:12.5px;color:#aab2c0}
+.card.broken{border-color:#5c2a2a}
+
+@media (max-width:640px){.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}}
+
+/* per-portrait ordering */
+.buy{padding:0 12px 13px;display:flex;align-items:center;min-height:36px}
+.buy button{width:100%;font-size:12.5px;padding:7px 10px;background:#22262f;border-color:#2e3340}
+.buy button:hover{background:var(--hot);border-color:var(--hot)}
+.owned{font-size:12px;color:var(--ok);letter-spacing:.02em}
+.card.unlocked{border-color:#1f5c41}
+.what{font-size:13px;color:#c3cad6;margin:0 0 10px}
+
+/* basket, recovery, guidance */
+.how{margin:0 0 14px;padding-left:22px;color:#c3cad6;font-size:13.5px}
+.how li{margin-bottom:5px}
+.warnbox{background:#2a2113;border:1px solid #5c4a1f;border-radius:8px;padding:11px 13px;
+  font-size:13px;color:#f0d9a8;margin:12px 0 0}
+.buy button.in-cart{background:#1f5c41;border-color:#2c7a57;color:#d8ffe9}
+/* `[hidden]` only sets display:none at low priority; a class rule that sets
+   display beats it, so the empty basket bar rendered anyway. Restore it. */
+.basketbar[hidden]{display:none}
+.basketbar{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:20;
+  display:flex;gap:16px;align-items:center;background:#1a1e27;border:1px solid #333a49;
+  border-radius:999px;padding:9px 10px 9px 20px;box-shadow:0 10px 30px rgba(0,0,0,.55)}
+.basket-what{font-size:13.5px;white-space:nowrap}
+.basketbar button{border-radius:999px}
+.recovery{margin-top:16px;padding:14px;border:1px solid #5c4a1f;background:#211b10;border-radius:9px}
+.recovery h4{margin:0 0 9px;font-size:13.5px;color:#f2b544}
+#restore-code{flex:1;min-width:260px;background:#0b0d12;border:1px solid var(--line);
+  color:var(--ink);padding:9px 11px;border-radius:7px;font:12.5px ui-monospace,monospace}

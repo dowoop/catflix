@@ -1,0 +1,24 @@
+[package]
+name = "catflix-requests"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+freenet-stdlib = { version = "0.8.5", features = ["contract"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[features]
+default = ["freenet-main-contract"]
+freenet-main-contract = []
+contract = ["freenet-stdlib/contract"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

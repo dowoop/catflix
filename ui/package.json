@@ -1,0 +1,13 @@
+{
+  "name": "catflix-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild app.js --bundle --format=iife --outfile=../site/app.js --minify"
+  },
+  "dependencies": {
+    "@freenetorg/freenet-stdlib": "^0.4.0",
+    "esbuild": "^0.28.2"
+  }
+}

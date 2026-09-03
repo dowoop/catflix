@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Catflix</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="wrap head">
+    <h1>CATFLIX</h1>
+    <span id="badge" class="badge">not subscribed</span>
+  </div>
+</header>
+
+<main class="wrap">
+  <p id="status" class="status">Loading…</p>
+
+  <section id="subscribe" class="panel">
+    <h2>Nine portraits. All of them encrypted.</h2>
+    <p>
+      Every poster below is public. Every <em>portrait</em> below is AES-GCM ciphertext
+      sitting in the same directory, replicated to the same Freenet peers, readable by
+      anyone and openable by nobody without a key.
+    </p>
+    <p>
+      <strong>Order one portrait for <span id="title-price">…</span></strong> and it is
+      yours, kept — its own key, sealed to you. Or take
+      <strong>all nine for 30 days for <span id="all-price">…</span></strong>. Pay in XTR
+      on the Tari Ootle; nothing about you is collected, because there is nowhere to
+      collect it to.
+    </p>
+    <ol class="how">
+      <li><strong>Add portraits to your basket</strong> with the button on each card, or take all nine below.</li>
+      <li><strong>Order.</strong> The page mints a key and gives you a reference to pay.</li>
+      <li><strong>Pay it</strong> from any Ootle wallet — or press <em>let the house pay</em> and it is done for you.</li>
+    </ol>
+    <button id="btn-subscribe" class="primary">Order all nine · 30 days</button>
+    <p class="fine">Keys held in this browser: <span id="keyring-count">0</span>. A key
+      <em>is</em> the purchase: the entitlement stays valid on Freenet forever, and only that
+      key can open it.</p>
+
+    <p id="no-storage" class="warnbox" hidden>
+      <strong>This page cannot save anything.</strong> Freenet serves it in a sandbox with no
+      storage, so a key lives only until you close the tab. After you order, copy the recovery
+      code it gives you — that code is your purchase, and nothing else can recover it.
+    </p>
+
+    <div id="order" class="order" hidden>
+      <h3>Pay this reference</h3>
+      <p class="what">Ordering: <strong id="order-what"></strong></p>
+      <div class="ref"><code id="order-ref"></code><button id="btn-copy">copy reference</button>
+        <button id="btn-cover">no wallet? let the house pay</button></div>
+      <p class="amount" id="order-amount"></p>
+      <p class="fine">The reference carries your public key in full, so the gatekeeper has
+        something to seal to. It also carries a random suffix, so this order cannot be
+        confused with any other — including your own next one.</p>
+      <pre id="order-cmd"></pre>
+      <p class="fine">Anyone may pay it. A stranger paying your reference gives <em>you</em>
+        what it names — they cannot open the envelope it produces.</p>
+
+      <div id="recovery" class="recovery" hidden>
+        <h4>Save this — it is your purchase</h4>
+        <div class="ref"><code id="recovery-code"></code><button id="btn-copy-code">copy code</button></div>
+        <p class="fine">This browser cannot store it. Paste it back into <em>Restore a key</em>
+          below to get your portraits again on any machine.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="grid" class="grid"></section>
+
+  <section class="panel">
+    <h2>Restore a key</h2>
+    <p class="fine">Paste a recovery code from an earlier order to unlock what it bought.</p>
+    <div class="ref">
+      <input id="restore-code" type="text" placeholder="paste a recovery code" autocomplete="off">
+      <button id="btn-restore">Restore</button>
+    </div>
+  </section>
+
+  <section class="panel truth">
+    <h2>What this does and does not enforce</h2>
+    <ul>
+      <li><strong>It enforces payment before first delivery.</strong> Without a valid envelope
+        there is no key, and the ciphertext is just noise. Each portrait has its own key, so
+        ordering one hands over one.</li>
+      <li><strong>It does not stop redistribution.</strong> A subscriber holds the content key
+        and the decrypted pixels, and can publish either. There is no cryptographic answer to
+        that — only DRM, which this is not. Netflix has the same property and a screen recorder.</li>
+      <li><strong>Expiry gates future deliveries, not past ones.</strong> A key already handed
+        over cannot be taken back by a date.</li>
+      <li><strong>The gatekeeper is needed to sell, never to serve.</strong> Stop it and every
+        existing subscriber keeps working; the entitlement is already replicated and the
+        ciphertext is already here.</li>
+      <li><strong>esmeralda is a faucet testnet.</strong> Test XTR is free to obtain, so the
+        price is a demonstration of payment plumbing, not an economic barrier.</li>
+    </ul>
+    <p class="fine">
+      entitlement contract <code id="contract-key">…</code><br>
+      payment component <code id="component">…</code>
+    </p>
+  </section>
+</main>
+
+<div id="basket" class="basketbar" hidden>
+  <span class="basket-what"><strong id="basket-count"></strong> · <span id="basket-total"></span></span>
+  <button id="btn-basket" class="primary"></button>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
