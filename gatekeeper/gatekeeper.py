@@ -470,12 +470,14 @@ def signing_key() -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(path.read_bytes())
 
 
-def issue_pending(db: sqlite3.Connection, contract: str | None, epoch: int, now: int) -> int:
+def issue_pending(db: sqlite3.Connection, contract: str | None, epoch: int, now: int,
+                  ports: list[int] | None = None) -> int:
     """OBLIGATION 5. Everything credited and not yet delivered.
 
     Runs on every start and after every poll, so a crash between crediting and
     issuing costs a restart rather than a subscription.
     """
+    ports = ports or [7509]
     pending = db.execute(
         "SELECT DISTINCT subscriber FROM payments WHERE issued = 0 AND subscriber IS NOT NULL"
     ).fetchall()
@@ -501,7 +503,7 @@ def issue_pending(db: sqlite3.Connection, contract: str | None, epoch: int, now:
 
     delta = E.register(entitlements)
     if contract:
-        push_delta(contract, delta)
+        push_delta(contract, delta, ports)
     else:
         print("  (no contract key configured -- delta written to keys/pending-delta.json only)")
     (KEYS / "pending-delta.json").write_text(json.dumps(delta, separators=(",", ":")))
@@ -513,24 +515,35 @@ def issue_pending(db: sqlite3.Connection, contract: str | None, epoch: int, now:
     return len(entitlements)
 
 
-def push_delta(contract: str, delta: dict) -> None:
-    """Hand the delta to the local node. The contract's own merge does the rest.
+def push_delta(contract: str, delta: dict, ports: list[int]) -> None:
+    """Hand the delta to every node that serves readers.
+
+    EVERY node, because an entitlement is only useful in the node the buyer's
+    browser is talking to. Running a private node for development and a
+    separate throwaway one behind a domain means two places a reader can be,
+    and issuing to one of them would leave the other's visitors staring at a
+    locked page after paying.
 
     A delta and not a full state: `update_state` joins, so sending only what
-    changed is both smaller and safer -- a full state written by a gatekeeper
-    holding a stale view would still be joined rather than obeyed, but there
-    is no reason to make the network check that.
+    changed is both smaller and safer.
     """
     path = KEYS / "delta.json"
     path.write_text(json.dumps(delta, separators=(",", ":")))
-    result = subprocess.run(
-        ["fdev", "execute", "update", contract, str(path)],
-        capture_output=True, text=True, timeout=300,
-    )
-    if result.returncode != 0:
-        raise SystemExit(
-            f"the node refused the update (exit {result.returncode}):\n{result.stderr[-2000:]}"
+    failures = []
+    for port in ports:
+        result = subprocess.run(
+            ["fdev", "-p", str(port), "execute", "update", contract, str(path)],
+            capture_output=True, text=True, timeout=300,
         )
+        if result.returncode != 0:
+            failures.append(f"  port {port}: {result.stderr.strip()[-400:]}")
+    # Refuse only if EVERY node refused. One node being down must not stop a
+    # paying customer being served by the others -- and the sweep will retry
+    # the rest on the next pass, because `issued` only clears on success.
+    if len(failures) == len(ports):
+        raise SystemExit("no node accepted the update:\n" + "\n".join(failures))
+    for line in failures:
+        print(f"  WARNING a node refused the update, others took it\n{line}")
 
 
 # --------------------------------------------------------------------------
@@ -560,7 +573,7 @@ def cmd_watch(args) -> None:
 
     # The sweep first, before reading a single new event. A restart is the
     # commonest way to arrive here holding undelivered credit.
-    swept = issue_pending(db, args.contract, args.epoch, now)
+    swept = issue_pending(db, args.contract, args.epoch, now, args.node_port)
     if swept:
         print(f"swept {swept} entitlement(s) credited but never issued")
     db.commit()
@@ -584,7 +597,7 @@ def cmd_watch(args) -> None:
             counts[verdict] = counts.get(verdict, 0) + 1
             highest = max(highest, event["_id"])
 
-        issued = issue_pending(db, args.contract, args.epoch, now)
+        issued = issue_pending(db, args.contract, args.epoch, now, args.node_port)
         # The cursor moves LAST and in the same transaction as the issuance.
         # Advancing it before delivering would turn a crash into a payment
         # that is never seen again.
@@ -600,16 +613,30 @@ def cmd_watch(args) -> None:
         time.sleep(args.interval)
 
 
-def read_queue(contract: str) -> list[str]:
-    """The references visitors have asked the house to pay."""
-    out = KEYS / "queue.json"
-    result = subprocess.run(
-        ["fdev", "execute", "get", contract, "-o", str(out)],
-        capture_output=True, text=True, timeout=300,
-    )
-    if result.returncode != 0:
-        raise SystemExit(f"could not read the request queue:\n{result.stderr[-1500:]}")
-    return json.loads(out.read_text()).get("refs", [])
+def read_queue(contract: str, ports: list[int]) -> list[str]:
+    """The references visitors have asked the house to pay, from every node.
+
+    Unioned across nodes: a visitor writes their request to whichever node
+    served them the page, and reading only one would silently ignore everybody
+    who arrived by the other door.
+    """
+    refs: set[str] = set()
+    reachable = 0
+    for port in ports:
+        out = KEYS / f"queue-{port}.json"
+        result = subprocess.run(
+            ["fdev", "-p", str(port), "execute", "get", contract, "-o", str(out)],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            continue
+        reachable += 1
+        body = out.read_text() if out.exists() else ""
+        if body.strip():
+            refs.update(json.loads(body).get("refs", []))
+    if not reachable:
+        raise SystemExit("no node could be read for the request queue")
+    return sorted(refs)
 
 
 def cmd_cover(args) -> None:
@@ -628,7 +655,7 @@ def cmd_cover(args) -> None:
                  db.execute("SELECT sale_ref FROM payments WHERE verdict = 'credited'").fetchall()}
 
     wanted = []
-    for reference in read_queue(args.queue):
+    for reference in read_queue(args.queue, args.node_port):
         if reference in paid_already or reference in seen_paid:
             continue
         try:
@@ -706,6 +733,8 @@ def main() -> None:
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("watch", help="read the chain, credit, and issue")
+    p.add_argument("--node-port", type=int, action="append", default=None,
+                   help="a Freenet node to serve (repeatable; default 7509)")
     p.add_argument("--contract", help="Freenet contract key to update")
     p.add_argument("--epoch", type=int, default=1)
     p.add_argument("--interval", type=int, default=20)
@@ -713,6 +742,8 @@ def main() -> None:
     p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("cover", help="pay for visitors who asked, up to a cap")
+    p.add_argument("--node-port", type=int, action="append", default=None,
+                   help="a Freenet node to serve (repeatable; default 7509)")
     p.add_argument("--queue", required=True, help="the request queue contract key")
     p.add_argument("--agent", default="catflix-e2e", help="agent_wallet identity that pays")
     p.add_argument(
@@ -728,6 +759,8 @@ def main() -> None:
     p.set_defaults(func=cmd_status)
 
     args = parser.parse_args()
+    if getattr(args, "node_port", None) is None and hasattr(args, "node_port"):
+        args.node_port = [7509]
     args.func(args)
 
 

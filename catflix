@@ -57,13 +57,18 @@ def config() -> dict:
     return json.loads(path.read_text())
 
 
-def site_url() -> str | None:
+def site_key() -> str | None:
     result = run(["fdev", "website", "list"], capture_output=True)
     for line in result.stdout.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[0] == SITE_KEY:
-            return f"http://127.0.0.1:7509/v1/contract/web/{parts[1]}/"
+            return parts[1]
     return None
+
+
+def site_url() -> str | None:
+    key = site_key()
+    return f"http://127.0.0.1:7509/v1/contract/web/{key}/" if key else None
 
 
 def node_is_up() -> bool:
@@ -123,17 +128,36 @@ def cmd_up(args) -> None:
 
 def cmd_serve(args) -> None:
     cfg = config()
+
+    # The front door, in a thread rather than one more service to remember.
+    # Without it a hostname's root is a 404 and the only working link is 44
+    # characters of base58 -- see frontdoor.py for why it cannot simply point
+    # at the node.
+    if args.front_door:
+        site = site_key()
+        if not site:
+            print("no published website yet; skipping the front door")
+        else:
+            import threading
+            import frontdoor
+            threading.Thread(target=frontdoor.serve, args=(args.front_door, site),
+                             daemon=True).start()
+            print(f"front door 127.0.0.1:{args.front_door} -> /v1/contract/web/{site[:12]}.../")
     print(f"seller running. entitlements {cfg['contract'][:12]}...  queue {cfg['requests'][:12]}...")
+    print(f"serving nodes: {', '.join(str(p) for p in (args.node_port or [7509]))}")
     print(f"tariff: {G.PRICE_MICROXTR_PER_TITLE:,} uXTR a portrait, "
           f"{G.PRICE_MICROXTR_PER_DAY * 30:,} uXTR all-access/30d")
     print("ctrl-c to stop\n")
+    ports = []
+    for port in args.node_port or [7509]:
+        ports += ["--node-port", str(port)]
     while True:
         run([sys.executable, "gatekeeper/gatekeeper.py", "watch", "--once",
-             "--contract", cfg["contract"]], cwd=ROOT)
+             "--contract", cfg["contract"]] + ports, cwd=ROOT)
         if not args.no_cover:
             run([sys.executable, "gatekeeper/gatekeeper.py", "cover",
                  "--queue", cfg["requests"], "--max", str(args.max_cover),
-                 "--agent", args.agent, "--wallet", str(WALLET)], cwd=ROOT)
+                 "--agent", args.agent, "--wallet", str(WALLET)] + ports, cwd=ROOT)
         if args.once:
             return
         time.sleep(args.interval)
@@ -266,6 +290,11 @@ def main() -> None:
     p.add_argument("--interval", type=int, default=15)
     p.add_argument("--max-cover", type=int, default=2)
     p.add_argument("--no-cover", action="store_true", help="do not pay for anybody")
+    p.add_argument("--front-door", type=int, metavar="PORT", default=None,
+                   help="serve a redirect on this port so a hostname's root reaches the site")
+    p.add_argument("--node-port", type=int, action="append", default=None,
+                   help="a node to issue into (repeatable; default 7509). Use both when a "
+                        "second node sits behind a domain, or its visitors never get served.")
     p.add_argument("--agent", default=AGENT)
     p.add_argument("--once", action="store_true")
     p.set_defaults(func=cmd_serve)

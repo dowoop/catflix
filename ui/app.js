@@ -406,7 +406,12 @@ function connect(contractKey) {
     // read the console of. Unset in the published build, where the node is
     // whatever host served the page.
     const host = state.config.node || location.host;
-    const url = new URL(`ws://${host}/v1/contract/command`);
+    // `wss:` on an https page, `ws:` on http. Hardcoding `ws:` works on a
+    // local node and is silently fatal behind a domain: a browser blocks a
+    // plaintext WebSocket from an https origin as mixed content, so the page
+    // would load, render the whole catalogue, and never connect to anything.
+    const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = new URL(`${scheme}//${host}/v1/contract/command`);
     let api;
     const handler = {
       onOpen() {

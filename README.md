@@ -187,6 +187,69 @@ serve the directory over plain HTTP. This is the only way to see its console.
 
 ---
 
+## Behind a domain
+
+Live at **https://<the catflix hostname>/** — a Cloudflare Tunnel to a
+Freenet node on this machine, for people who do not run a node themselves.
+
+```
+<the catflix hostname>
+        │  cloudflared, outbound only — no port is opened on this host
+        ├── /v1/contract/web/<key>/*  ─┐
+        │   /v1/contract/command       ├─► 127.0.0.1:7510   throwaway node
+        └── everything else ──────────►   127.0.0.1:7511   redirect to the site
+```
+
+**A throwaway node, not the working one.** `freenet --ws-api-address` says of
+this port: *"anything that can reach this address and port can read and modify
+your contract state, identities and keys."* The app needs that socket, so the
+node it belongs to is one holding nothing but public cat ciphertext and two
+self-validating contracts. The working node on 7509 stays off the internet.
+What an exposed API risks is the node — not the site, which is signed by a key
+that never enters a node, and not entitlements, which are refused unless the
+gatekeeper signed them.
+
+**Only two paths are proxied.** The node serves its **admin dashboard** at `/`.
+Sending a hostname's root at the node would publish the control surface, so
+everything outside those two paths goes to `frontdoor.py`, twenty lines that
+302 to the site and hold nothing.
+
+**The seller must serve every node a reader might use.** `--node-port` is
+repeatable and entitlements are pushed to all of them; the request queue is
+read from all and unioned. Issuing to one node while somebody reads from
+another leaves a paying customer looking at a locked page:
+
+```bash
+./catflix serve --node-port 7509 --node-port 7510 --front-door 7511
+```
+
+### Two things that broke, both silent
+
+**`ws://` hardcoded.** A browser blocks a plaintext WebSocket from an `https`
+page as mixed content, so the page would load, render the entire catalogue, and
+never connect. The scheme is derived from `location.protocol` now.
+
+**The node refuses a WebSocket carrying an `Origin` it does not know.** With
+the reverse proxy in place the upgrade returned `403 WebSocket connections from
+this origin are not allowed`, while a client sending *no* Origin got `101` — so
+every tool said the socket was fine and only a browser failed. `--allowed-host`
+is the flag for it, and Freenet's own help says why it exists: *"that is a
+Host-header allowlist, and it works on loopback, where a same-host reverse
+proxy lives."*
+
+```bash
+freenet local --ws-api-port 7510 --allowed-host <the catflix hostname> \
+    --config-dir ~/.config/freenet-public --data-dir ~/.local/share/freenet-public
+```
+
+### What the domain costs
+
+A visitor arriving this way is trusting **this machine** — its uptime, its
+operator, and a DNS record that can be pulled. The README's claim that this
+needs *no domain, no TLS certificate, no host* stops being true for them; it
+stays true for anyone who opens the same contract address on their own node,
+which is the version that survives this machine being switched off.
+
 ## You cannot automate a Freenet web container
 
 A node serves every web container inside an iframe (`?__sandbox=1`) carrying
