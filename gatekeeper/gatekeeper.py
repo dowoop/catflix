@@ -85,6 +85,13 @@ KEYS = ROOT / "keys"
 RUN = ROOT / "run"
 LEDGER = KEYS / "ledger.sqlite3"
 
+# The payer of last resort lives in a SIBLING repository, so its path is a
+# fact about a checkout rather than about this program. Derived from this
+# file's own location and overridable, because the absolute path this used to
+# carry named one machine's home directory and was wrong everywhere else.
+DEFAULT_WALLET = Path(os.environ.get(
+    "CATFLIX_WALLET", ROOT.parent / "Point of Sale" / "agent_wallet.py"))
+
 INDEXER = "https://ootle-indexer-a.tari.com"
 COMPONENT = "component_a2208e00baa392cd1a6d6ef8336e083fac01499ec19dacde0f245114f0f37aab"
 TOPIC = "Payments.PaymentReceived"
@@ -1005,7 +1012,7 @@ def main() -> None:
     p.add_argument("--agent", default="catflix-e2e", help="agent_wallet identity that pays")
     p.add_argument(
         "--wallet",
-        default="~/Workstation/Business/Point of Sale/agent_wallet.py",
+        default=str(DEFAULT_WALLET),
         help="path to agent_wallet.py",
     )
     p.add_argument("--days", type=int, default=30)

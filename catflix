@@ -42,7 +42,7 @@ SITE_KEY = "catflix"
 # The payer of last resort. It is a wallet in this workspace, so it is the
 # MERCHANT's wallet no matter whose directory it sits in -- `pay` is a
 # convenience for exercising the path, not evidence that a stranger paid.
-WALLET = Path("~/Workstation/Business/Point of Sale/agent_wallet.py")
+WALLET = G.DEFAULT_WALLET
 AGENT = "catflix-e2e"
 
 
