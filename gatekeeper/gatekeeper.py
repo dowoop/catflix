@@ -85,12 +85,12 @@ KEYS = ROOT / "keys"
 RUN = ROOT / "run"
 LEDGER = KEYS / "ledger.sqlite3"
 
-# The payer of last resort lives in a SIBLING repository, so its path is a
-# fact about a checkout rather than about this program. Derived from this
-# file's own location and overridable, because the absolute path this used to
-# carry named one machine's home directory and was wrong everywhere else.
+# The payer of last resort. It lived in a sibling repository until 2026-09-04
+# and now lives here, under `payer/`, because that repository is gone and a
+# shop that cannot pay for anything is not a shop. Derived from this file's
+# own location and overridable, so a checkout anywhere works.
 DEFAULT_WALLET = Path(os.environ.get(
-    "CATFLIX_WALLET", ROOT.parent / "Point of Sale" / "agent_wallet.py"))
+    "CATFLIX_WALLET", ROOT / "payer" / "agent_wallet.py"))
 
 INDEXER = "https://ootle-indexer-a.tari.com"
 COMPONENT = "component_a2208e00baa392cd1a6d6ef8336e083fac01499ec19dacde0f245114f0f37aab"

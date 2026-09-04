@@ -163,6 +163,28 @@ page writes its reference into a second, unsigned, grow-only contract and the
 operator reads it from the other side. Anyone may append; the house decides
 what it pays, and the cap is the protection.
 
+### `payer/` — the wallet that spends
+
+Everything above is about *selling*. This is the half that *pays*: an Ootle
+identity that can take faucet funds and send XTR, driven by `agent_wallet.py`
+over the `toolkit` binary built from `payer/ootle/toolkit`.
+
+It lived in a sibling repository until 2026-09-04 and moved here when that
+repository was retired. Nothing about it is subtle except what it refuses to
+do: agent identities start at slot 1000 and are bounded above, because the
+toolkit parses its slot as a `u32` and falls back to **slot 1 -- the sealed
+merchant key** when the parse fails, so a lower bound alone would not close
+that door. It also strips the passphrase from the child's environment, so even
+a wrong slot cannot open the sealed key.
+
+Two things it is honest about. It is a **safety rail, not a security
+boundary** -- anything running as this Unix user defeats it. And its state
+lives in `~/.cryptopos_learning/agent_wallets.json`, outside this repository,
+so a fresh clone starts with no identities and mints its own.
+
+Build it once with `cargo build --release` in `payer/ootle/toolkit`; the
+source is tracked and the binary is not.
+
 ---
 
 ## Running it

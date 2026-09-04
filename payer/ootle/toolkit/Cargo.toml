@@ -1,0 +1,98 @@
+[package]
+name = "toolkit"
+version = "0.1.0"
+edition = "2021"
+
+# A WORKSTATION TOOL, NOT AN APP DEPENDENCY. The terminal stays stdlib-only
+# Python; this binary exists so a human (or a session) can create an Ootle
+# account, take faucet funds, publish a template and call it, without the
+# wallet daemon's Web UI. `tari_ootle_walletd` is deliberately not used: it is
+# not published to crates.io and would need a source build or a GitHub release
+# binary, while `ootle-rs` talks to the indexer directly with a local keypair.
+#
+# Publishing programmatically is an override of the vendored skill, recorded
+# in NEXT.md with its boundary: The maintainer allowed it on 2026-07-27 on the stated
+# grounds that this is testnet, and the override does not survive contact with
+# mainnet.
+[dependencies]
+# Checked against crates.io 2026-07-28: 0.16.0 is latest.
+# 2026-08-30: esmeralda runs indexer 0.39.3 and REFUSED a 0.16-built
+# transaction -- "Failed to decode transaction: unexpected type null at
+# position 251: expected u64". The wire format moved; these follow it.
+ootle-rs = "0.21"
+
+# The async runtime ootle-rs's provider requires. `rt-multi-thread` rather
+# than `rt`: the transaction watcher streams server-sent events while the
+# submit future is still alive.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# For persisting the keypair as hex. Both are already in ootle-rs's dependency
+# tree, so neither adds a download.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# For hex on the secret key. ootle-rs re-exports the crypto crate, but the
+# `Hex` trait lives in tari_utilities behind it, so it is named here rather
+# than reached through a re-export that may not stay public.
+tari_crypto = "0.23"
+
+# For the `args!` macro and the instruction builder. ootle-rs uses this crate
+# internally but does not re-export the macro, so it is named directly rather
+# than reached through a private path that could change.
+tari_ootle_transaction = "0.39"
+
+# For `SubstateId`, which `want_substate` takes and ootle-rs does not re-export
+# — its root offers only `displayable` out of this crate. Named directly for the
+# same reason as the line above.
+#
+# `loyalty redeem` is why it is here, and the reason is the contract's design
+# rather than a library gap. `redeem_points` reads the enrolment NFT out of the
+# register instead of taking it as an argument — that IS the guard that stops a
+# redemption being aimed at somebody else's points — so the input resolver,
+# which sees only instruction arguments, cannot know the substate is needed. It
+# has to be asked for by id, and an id needs this type. Measured on esmeralda
+# 2026-08-14 as `SubstateNotFound` at instruction #1, for the price of one fee.
+# 2026-08-30: bumped 0.37 -> 0.39 with ootle-rs. Left at 0.37 it pulled a
+# SECOND `tari_engine_types` into the graph, and `want_substate` then refused
+# its own argument -- "expected `SubstateId`, found a different `SubstateId`".
+# The two crates must move together.
+tari_ootle_common_types = "0.39"
+
+# THE HANDOFF (R2). An unsigned transaction has to leave this process, reach a
+# party holding a different key, and come back with a signature attached — so
+# both `UnsignedTransaction` and `TransactionSignature` need to survive a round
+# trip through a file. Both derive minicbor unconditionally (serde is behind a
+# feature flag and this is not), and `tari_bor` is the encode/decode pair for
+# exactly those derives. Already in ootle-rs's dependency tree — checked
+# against Cargo.lock 2026-08-15 — so it adds no download, which is the bar
+# every line above was admitted under.
+#
+# CBOR rather than JSON on purpose: the bytes a signature commits to are the
+# canonical encoding, and a JSON round trip that re-orders a map or widens an
+# integer would produce a request that verifies differently from the one that
+# was signed. Hex on the outside, so the file is still something a human can
+# copy out of a terminal.
+tari_bor = "0.14.2"
+
+# KEY AT REST. All three are already in ootle-rs's dependency tree — checked
+# against Cargo.lock 2026-08-14 — so none of them adds a download, which is the
+# same bar `serde` and `serde_json` were admitted under above.
+#
+# argon2id for the KDF rather than a bare hash: the thing being protected is a
+# passphrase a human chose, so the only defence that matters is making each
+# guess expensive. chacha20poly1305 rather than a cipher without a tag, because
+# a key file that decrypts to garbage under the wrong passphrase must FAIL
+# rather than hand back 32 plausible bytes and let the tool derive a stranger's
+# account from them.
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+# So the passphrase and the decrypted secret do not outlive their use in this
+# process's memory. Not a defence against a live compromise — see the module
+# docs on what this does and does not buy — but free and correct.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+# UTC stamps on the finality measurement record. Clock + std only — no
+# timezone database, no serde feature. The measurement JSON already carries
+# Unix seconds; the ISO string is for the same human path every other
+# harnesses/measurements/*.json file uses.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

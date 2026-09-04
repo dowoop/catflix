@@ -24,3 +24,10 @@ unlocked/
 
 # Regenerated every sweep. `keys/` is the one that must never be deleted.
 run/
+
+# The payer's Rust build output. `target/` above already matches this, but it
+# is named explicitly because the pattern above was written for the contract
+# crates at the repository root and a reader should not have to work out that
+# it reaches here too. The SOURCE is tracked; `cargo build --release` in
+# payer/ootle/toolkit rebuilds the binary agent_wallet.py looks for.
+payer/ootle/toolkit/target/
