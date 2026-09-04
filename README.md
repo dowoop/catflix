@@ -284,6 +284,34 @@ That is why `config.json` accepts a `node` key. Point it at your node, serve
 console. Every interactive claim in the table above was proven that way, and
 the bundles were then compared by sha256.
 
+## Two directories, and only one of them matters
+
+```
+keys/   losing any of this cannot be undone
+        gatekeeper.ed25519   its PUBLIC half is the contract's address, so
+                             replacing it abandons every entitlement ever sold
+        content-titles.json  lose these and every portrait sold becomes
+                             ciphertext to the people who bought it
+        ledger.sqlite3       what was sold, to whom, and what is undelivered
+        order-*.json         purchases made by `catflix order` — these are keys
+
+run/    regenerated on the next sweep; delete freely
+```
+
+They were one directory until somebody had to be told which of twenty-five
+files were safe to delete — which is a question nobody should have to ask about
+a directory containing a private key. `run/` is gitignored; so is `keys/`.
+
+## Only one seller
+
+`catflix serve` takes an exclusive lock on `run/serve.lock` and refuses to
+start beside another. Two of them ran side by side here for several hours and
+it was invisible: both printed the same reassuring lines. They share one SQLite
+ledger and both mint the `seq` the entitlement contract joins on, so the second
+is a race over who issues what. Crediting survives it — the event id is a
+primary key — but issuance does not, and the failure would look like a
+customer's purchase quietly never arriving.
+
 ## Five ways this broke, all of them quiet
 
 Each cost real time and each is the same shape: a check that lived in one place

@@ -125,5 +125,5 @@ echo "  site/ is $(du -sh site | cut -f1) across $(find site -type f | wc -l) fi
 
 say "done"
 echo "publish the UI:   fdev website publish ./site --key catflix"
-echo "publish the data: fdev execute put --code $WASM --parameters $PARAMS contract --state keys/initial-state.json"
+echo "publish the data: fdev execute put --code $WASM --parameters $PARAMS contract --state run/initial-state.json"
 echo "run the seller:   python3 gatekeeper/gatekeeper.py watch --contract $CONTRACT"

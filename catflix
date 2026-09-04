@@ -102,13 +102,14 @@ def cmd_up(args) -> None:
     print("\n--- publishing contracts ---")
     # `put` on a contract the node already holds is harmless, so this is safe
     # to re-run. The initial state is only adopted for a contract that is new.
-    (ROOT / "keys" / "initial-state.json").write_text('{"v":1,"entitlements":[]}')
-    (ROOT / "keys" / "initial-queue.json").write_text('{"v":1,"refs":[]}')
+    (ROOT / "run").mkdir(exist_ok=True)
+    (ROOT / "run" / "initial-state.json").write_text('{"v":1,"entitlements":[]}')
+    (ROOT / "run" / "initial-queue.json").write_text('{"v":1,"refs":[]}')
     run(["fdev", "execute", "put", "--code", wasm, "--parameters", "keys/params.bin",
-         "contract", "--state", "keys/initial-state.json"], cwd=ROOT, capture_output=True)
+         "contract", "--state", "run/initial-state.json"], cwd=ROOT, capture_output=True)
     print(f"  entitlements  {cfg['contract']}")
     run(["fdev", "execute", "put", "--code", queue_wasm,
-         "contract", "--state", "keys/initial-queue.json"], cwd=ROOT, capture_output=True)
+         "contract", "--state", "run/initial-queue.json"], cwd=ROOT, capture_output=True)
     print(f"  requests      {cfg['requests']}")
 
     print("\n--- publishing the site ---")
@@ -127,6 +128,31 @@ def cmd_up(args) -> None:
 
 
 def cmd_serve(args) -> None:
+    """Run the seller. ONE of them, which is not a stylistic preference.
+
+    Two sellers ran side by side here for several hours, and it was invisible:
+    both printed the same reassuring lines. They share one SQLite ledger and
+    both mint the `seq` that the entitlement contract joins on, so the second
+    one is a race over who issues what, resolved by whichever committed last.
+    Crediting survives it -- the event id is a primary key -- but issuance does
+    not, and the failure would look like a customer's purchase quietly not
+    arriving.
+    """
+    lock = ROOT / "run" / "serve.lock"
+    lock.parent.mkdir(exist_ok=True)
+    handle = open(lock, "w")
+    try:
+        import fcntl
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(
+            f"another seller already holds {lock}.\n"
+            "  Two sellers share one ledger and both mint the contract's join key.\n"
+            "  Stop the other one first:  pkill -f 'catflix serve'"
+        )
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+
     cfg = config()
 
     # The front door, in a thread rather than one more service to remember.
@@ -198,7 +224,7 @@ def cmd_order(args) -> None:
     sk = X25519PrivateKey.generate()
     pub = sk.public_key().public_bytes_raw()
     reference = f"CF1.{E.b64(pub)}.{args.sku}.{E.b64(os.urandom(9))}"
-    keyfile = ROOT / "keys" / f"order-{E.b64(pub)[:12]}.json"
+    keyfile = ROOT / "keys" / f"order-{E.b64(pub)[:12]}.json"   # a purchase, never run/
     keyfile.write_text(json.dumps({"priv": E.b64(sk.private_bytes_raw()),
                                    "pub": E.b64(pub), "ref": reference, "sku": args.sku}))
     keyfile.chmod(0o600)
@@ -235,7 +261,7 @@ def cmd_order(args) -> None:
 
 
 def read_contract(contract: str) -> dict:
-    out = ROOT / "keys" / "state-read.json"
+    out = ROOT / "run" / "state-read.json"
     run(["fdev", "execute", "get", contract, "-o", str(out)], cwd=ROOT, capture_output=True)
     body = out.read_text() if out.exists() else ""
     return json.loads(body) if body.strip() else {"entitlements": []}

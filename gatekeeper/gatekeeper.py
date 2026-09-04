@@ -71,8 +71,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import envelope as E
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# `keys/` holds things whose loss cannot be undone: the signing key (its public
+# half IS the contract's address), the content keys, the ledger, and every
+# order key a buyer was handed. `run/` holds files regenerated on the next
+# sweep. They were one directory until somebody had to be told which of
+# twenty-five files were safe to delete -- which is a question nobody should
+# have to ask about a directory containing a private key.
 KEYS = ROOT / "keys"
-LEDGER = ROOT / "keys" / "ledger.sqlite3"
+RUN = ROOT / "run"
+LEDGER = KEYS / "ledger.sqlite3"
 
 INDEXER = "https://ootle-indexer-a.tari.com"
 COMPONENT = "component_a2208e00baa392cd1a6d6ef8336e083fac01499ec19dacde0f245114f0f37aab"
@@ -166,6 +174,7 @@ CREATE TABLE IF NOT EXISTS covered (
 
 def open_ledger() -> sqlite3.Connection:
     KEYS.mkdir(exist_ok=True)
+    RUN.mkdir(exist_ok=True)
     db = sqlite3.connect(LEDGER)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
@@ -506,7 +515,7 @@ def issue_pending(db: sqlite3.Connection, contract: str | None, epoch: int, now:
         push_delta(contract, delta, ports)
     else:
         print("  (no contract key configured -- delta written to keys/pending-delta.json only)")
-    (KEYS / "pending-delta.json").write_text(json.dumps(delta, separators=(",", ":")))
+    (RUN / "pending-delta.json").write_text(json.dumps(delta, separators=(",", ":")))
 
     db.execute(
         "UPDATE payments SET issued = 1, issued_at = ? WHERE issued = 0 AND subscriber IS NOT NULL",
@@ -527,7 +536,8 @@ def push_delta(contract: str, delta: dict, ports: list[int]) -> None:
     A delta and not a full state: `update_state` joins, so sending only what
     changed is both smaller and safer.
     """
-    path = KEYS / "delta.json"
+    RUN.mkdir(exist_ok=True)
+    path = RUN / "delta.json"
     path.write_text(json.dumps(delta, separators=(",", ":")))
     failures = []
     for port in ports:
@@ -620,10 +630,11 @@ def read_queue(contract: str, ports: list[int]) -> list[str]:
     served them the page, and reading only one would silently ignore everybody
     who arrived by the other door.
     """
+    RUN.mkdir(exist_ok=True)
     refs: set[str] = set()
     reachable = 0
     for port in ports:
-        out = KEYS / f"queue-{port}.json"
+        out = RUN / f"queue-{port}.json"
         result = subprocess.run(
             ["fdev", "-p", str(port), "execute", "get", contract, "-o", str(out)],
             capture_output=True, text=True, timeout=300,
