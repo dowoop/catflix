@@ -284,6 +284,39 @@ That is why `config.json` accepts a `node` key. Point it at your node, serve
 console. Every interactive claim in the table above was proven that way, and
 the bundles were then compared by sha256.
 
+## Bringing it back up
+
+Nothing here survives a reboot on purpose — no services were installed. The
+whole thing is four processes, and the addresses do not move: contract
+addresses come from the WASM and the gatekeeper's public key, and the site
+address from its signing key, so a restart lands on the same URLs.
+
+```bash
+# 1. the working node
+freenet local --ws-api-address 127.0.0.1
+
+# 2. the node behind the domain. --allowed-host is NOT optional: without it
+#    the node returns 403 to any WebSocket carrying an Origin, which is every
+#    browser and no command-line client.
+freenet local --ws-api-port 7510 --allowed-host <the catflix hostname> \
+    --config-dir ~/.config/freenet-public --data-dir ~/.local/share/freenet-public
+
+# 3. contracts and site onto both
+./catflix up
+WS_API_PORT=7510 ./catflix up
+
+# 4. one seller, both nodes, and the front door the tunnel expects on 7511
+./catflix serve --node-port 7509 --node-port 7510 --front-door 7511
+```
+
+`cloudflared` is not ours and is left alone; its ingress rules for
+`<the catflix hostname>` stay in `~/.cloudflared/config.yml` (with
+`config.yml.bak` beside them as a rollback). While the nodes are down that
+hostname answers **502** — the DNS record and the tunnel are fine, there is
+simply nothing behind them. `<the published hostname>` is unaffected either way.
+
+Check it came back with `./catflix check` and `./catflix status`.
+
 ## Two directories, and only one of them matters
 
 ```
