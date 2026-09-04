@@ -426,3 +426,7 @@ Two more things that are true and easy to overstate:
   three parts and bundles were keyed by epoch. `open_ledger` detects the old
   schema and tells you to archive it, rather than failing later in the middle
   of crediting somebody's payment.
+
+## Licence
+
+MIT — the full text is in [`LICENSE`](LICENSE).
