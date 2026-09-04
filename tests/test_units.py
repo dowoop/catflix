@@ -146,6 +146,8 @@ G.KEYS = tmp
     {t["id"]: E.b64(bytes([i]) * 32) for i, t in enumerate(G.catalogue())}))
 db = G.open_ledger()
 now = 1_800_000_000
+real_read_transaction_outcome = G.read_transaction_outcome
+G.read_transaction_outcome = lambda _tx_id: G.COMMITTED
 
 
 def event(event_id: int, reference: str, amount: int, tx: str = "tx"):
@@ -222,6 +224,8 @@ closed = {r["verdict"].split(":")[0] for r in db.execute("SELECT DISTINCT verdic
 check("only credited payments wait to be delivered", unissued == {"credited"}, f"got {unissued}")
 check("underpaid and ignored payments are closed, not queued",
       closed == {"underpaid", "ignored"}, f"got {closed}")
+
+G.read_transaction_outcome = real_read_transaction_outcome
 
 # ---------------------------------------------------------------------------
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")

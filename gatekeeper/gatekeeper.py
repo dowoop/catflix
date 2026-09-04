@@ -64,6 +64,9 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -107,9 +110,43 @@ REFERENCE_PREFIX = "CF1"
 # bound a MALFORMED one is measured against before anything parses it.
 MAX_REFERENCE = 128
 
+# Indexer replies are protocol messages, not an invitation for the remote end
+# to choose this process's memory use. This is the same ceiling used by the
+# published Ootle rail.
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+#: The longest a single read may block. See `read_events`: this is a slice of
+#: the caller's timeout rather than the whole of it, so the wall-clock deadline
+#: there is enforced instead of merely stated. Five seconds because esmeralda
+#: answers a live replay in under one -- measured at 4.56s for five events over
+#: a cold connection on 2026-08-31, and well under that warm.
+READ_SLICE_SECONDS = 5
+
+#: The most the house will EVER spend covering strangers, in microXTR, across
+#: the whole life of the ledger.
+#:
+#: `cover --max` bounds ONE SWEEP and `./catflix serve` sweeps forever, so until
+#: this existed the only limit on house spending was how long the seller was
+#: left running. The queue contract is unsigned and grow-only by design -- that
+#: is what lets a visitor with no wallet ask at all -- so anyone can append
+#: fresh, valid, unpaid references indefinitely and collect `--max` portraits
+#: every interval. At the default two per 15s sweep and 1,000,000 uXTR a
+#: portrait that is about 11,520 XTR a day, which is faucet capacity rather than
+#: money, and is still the wrong thing for a reference implementation to teach.
+#:
+#: 60,000,000 uXTR is sixty portraits, or two months of all-access. Enough that
+#: an ordinary demo never notices it; small enough that a drain stops.
+HOUSE_BUDGET_MICROXTR = 60_000_000
+
+COMMITTED = "Commit"
+
 
 class Refusal(Exception):
     """A payment this gatekeeper will not act on, with the reason it gives."""
+
+
+class UnresolvedTransaction(Exception):
+    """The indexer did not provide a transaction outcome we can decide on."""
 
 
 # --------------------------------------------------------------------------
@@ -309,42 +346,145 @@ def read_events(after_id: int, timeout: int = 30) -> list[dict]:
     subset naming one sale -- the rail answers "was THIS sale paid?", and the
     question here is "what has anyone paid?".
     """
-    import urllib.request
-
     url = (
         f"{INDEXER}/transactions/events/stream"
         f"?substate_id={COMPONENT}&topic={TOPIC}&after_id={after_id}"
     )
     request = urllib.request.Request(url, headers={"User-Agent": "catflix-gatekeeper/0.1"})
 
-    # THIS ENDPOINT DOES NOT END. It replays the backlog and then holds the
-    # connection open, emitting a bare `:` keepalive comment forever. A plain
-    # `.read()` therefore blocks until something kills the process -- which is
-    # exactly what happened the first time this ran, and it looks identical to
-    # an indexer that is merely slow.
-    #
-    # So the backlog is read LINE BY LINE and the first keepalive ends it:
-    # that comment is the indexer saying "you are now current". A wall-clock
-    # deadline backs it up, because a reader whose only exit condition is a
-    # byte the server chooses to send is a reader the server can hang.
+    # THIS ENDPOINT DOES NOT END. Read one bounded replay and treat a socket
+    # timeout after connecting as its end. A comment is not an end marker in
+    # SSE: it is legal before, between, or inside the backlog, so stopping at
+    # one can silently skip a payment.
     events = []
-    event_id = None
+    data_lines: list[str] = []
+    event_id_text: str | None = None
+    last_id = after_id
+    response_bytes = 0
     deadline = time.monotonic() + timeout
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        for raw in response:
-            if time.monotonic() > deadline:
+
+    def dispatch() -> None:
+        nonlocal data_lines, event_id_text, last_id
+        if not data_lines:
+            event_id_text = None
+            return
+        if event_id_text is None or not event_id_text.isdecimal():
+            raise ValueError("event stream frame had no non-negative decimal id")
+        event_id = int(event_id_text)
+        if event_id <= last_id:
+            raise ValueError("event stream ids were not strictly increasing after the cursor")
+        try:
+            payload = json.loads("\n".join(data_lines))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"event stream data was not JSON: {exc}") from None
+        if not isinstance(payload, dict):
+            raise ValueError("event stream data was not a JSON object")
+        payload["_id"] = event_id
+        events.append(payload)
+        last_id = event_id
+        data_lines = []
+        event_id_text = None
+
+    # THE PER-READ TIMEOUT IS A SLICE OF THE BUDGET, NOT THE WHOLE OF IT, and
+    # that is what makes the deadline below real. `urlopen(timeout=...)` bounds
+    # each recv, not a `readline`: a server that sends one byte every
+    # `timeout - 1` seconds resets the clock on every recv and never completes
+    # the line, so a single `readline` can outlive any wall-clock deadline
+    # checked before it. The byte ceiling still holds -- but 4 MiB trickled a
+    # byte at a time is years, so the memory bound was doing all the work and
+    # the time bound was a sentence. Slicing it means the worst overshoot past
+    # the deadline is one `READ_SLICE_SECONDS`, which is a bound rather than a
+    # hope.
+    #
+    # A slow-but-honest indexer that needs longer than one slice to produce the
+    # next line is treated as the end of the replay. That is safe here for the
+    # reason the published Ootle rail gives about the same situation: the events
+    # are cursor-addressed, so a short read is a SHORTER answer, not a partial
+    # one -- the next poll resumes from the last id seen and nothing is skipped.
+    with urllib.request.urlopen(request, timeout=READ_SLICE_SECONDS) as response:
+        while time.monotonic() <= deadline:
+            try:
+                raw = response.readline(MAX_RESPONSE_BYTES + 1 - response_bytes)
+            except OSError:
+                # The connection was established. Esmeralda holds an idle SSE
+                # response open, so its read timeout is the normal replay end.
                 break
-            line = raw.decode("utf-8", "replace").rstrip("\n")
+            response_bytes += len(raw)
+            if response_bytes > MAX_RESPONSE_BYTES:
+                raise ValueError(
+                    f"indexer event response exceeded {MAX_RESPONSE_BYTES} bytes"
+                )
+            if not raw:
+                break
+            try:
+                line = raw.decode("utf-8").rstrip("\r\n")
+            except UnicodeDecodeError as exc:
+                raise ValueError(f"event stream was not UTF-8: {exc}") from None
+            if line == "":
+                dispatch()
+                continue
             if line.startswith(":"):
-                break                      # caught up with the head of the stream
-            if line.startswith("id: "):
-                event_id = int(line[4:])
-            elif line.startswith("data: ") and event_id is not None:
-                payload = json.loads(line[6:])
-                payload["_id"] = event_id
-                events.append(payload)
-                event_id = None
+                continue
+
+            field, separator, value = line.partition(":")
+            if not separator:
+                value = ""
+            elif value.startswith(" "):
+                value = value[1:]
+            if field == "data":
+                data_lines.append(value)
+            elif field == "id":
+                event_id_text = value
+        # Accept a complete final frame even if a finite test server closes
+        # without the optional trailing blank line. A partial JSON frame fails
+        # closed, leaving the cursor untouched so the next read replays it.
+        if data_lines:
+            dispatch()
     return events
+
+
+def read_transaction_outcome(transaction_id: str, timeout: int = 30) -> str:
+    """Return the indexer's explicit outcome, or raise while it is unknown.
+
+    Only an explicit ``Commit`` permits disclosure. An explicit other outcome
+    is a refusal. Transport failures, oversized replies, malformed JSON, and a
+    reply for a different transaction are unresolved: none is evidence that
+    the transaction aborted, and the caller must persist and retry the event.
+    """
+    if not isinstance(transaction_id, str) or not transaction_id:
+        raise UnresolvedTransaction("transaction id was not non-empty text")
+    encoded = urllib.parse.quote(transaction_id, safe="")
+    request = urllib.request.Request(
+        f"{INDEXER}/transactions/{encoded}",
+        headers={"User-Agent": "catflix-gatekeeper/0.1"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise UnresolvedTransaction(
+                f"transaction response exceeded {MAX_RESPONSE_BYTES} bytes"
+            )
+        body = json.loads(raw.decode("utf-8"))
+    except UnresolvedTransaction:
+        raise
+    except urllib.error.HTTPError as exc:
+        raise UnresolvedTransaction(f"indexer answered HTTP {exc.code}") from None
+    except (urllib.error.URLError, OSError) as exc:
+        raise UnresolvedTransaction(f"indexer did not answer: {exc}") from None
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise UnresolvedTransaction(f"indexer transaction reply was not JSON: {exc}") from None
+
+    transaction = body.get("transaction") if isinstance(body, dict) else None
+    if not isinstance(transaction, dict):
+        raise UnresolvedTransaction("indexer transaction reply had an unknown shape")
+    if transaction.get("transaction_id") != transaction_id:
+        raise UnresolvedTransaction("indexer answered with a different transaction")
+    summary = transaction.get("summary")
+    outcome = summary.get("outcome") if isinstance(summary, dict) else None
+    if not isinstance(outcome, str) or not outcome:
+        raise UnresolvedTransaction("indexer transaction reply had no outcome")
+    return outcome
 
 
 # --------------------------------------------------------------------------
@@ -359,13 +499,23 @@ def credit(db: sqlite3.Connection, event: dict, now: int) -> str:
     a re-read cursor safe.
     """
     event_id = event["_id"]
-    if db.execute("SELECT 1 FROM payments WHERE event_id = ?", (event_id,)).fetchone():
+    existing_payment = db.execute(
+        "SELECT * FROM payments WHERE event_id = ?", (event_id,)
+    ).fetchone()
+    if existing_payment is not None and existing_payment["verdict"] != "unresolved":
         return "duplicate"
 
-    payload = event["event"]["payload"]
-    sale_ref = payload["sale_ref"]
-    amount = int(payload["amount"])
-    tx_id = event["transaction_id"]
+    if existing_payment is None:
+        payload = event["event"]["payload"]
+        sale_ref = payload["sale_ref"]
+        amount = int(payload["amount"])
+        tx_id = event["transaction_id"]
+    else:
+        # Once persisted, the first sighting is authoritative. A replay whose
+        # body changed must not be able to change what this event purchases.
+        sale_ref = existing_payment["sale_ref"]
+        amount = existing_payment["amount"]
+        tx_id = existing_payment["tx_id"]
 
     try:
         key, sku = parse_reference(sale_ref)
@@ -379,15 +529,52 @@ def credit(db: sqlite3.Connection, event: dict, now: int) -> str:
         return "ignored"
 
     subscriber = E.b64(key)
+    try:
+        outcome = read_transaction_outcome(tx_id)
+    except UnresolvedTransaction:
+        if existing_payment is None:
+            db.execute(
+                "INSERT INTO payments "
+                "(event_id, tx_id, sale_ref, amount, subscriber, verdict, days, seen_at, issued) "
+                "VALUES (?,?,?,?,?,'unresolved',0,?,0)",
+                (event_id, tx_id, sale_ref, amount, subscriber, now),
+            )
+        return "unresolved"
+
+    if outcome != COMMITTED:
+        verdict = f"refused: transaction outcome {outcome!r}"
+        if existing_payment is None:
+            db.execute(
+                "INSERT INTO payments "
+                "(event_id, tx_id, sale_ref, amount, subscriber, verdict, days, seen_at, issued) "
+                "VALUES (?,?,?,?,NULL,?,0,?,1)",
+                (event_id, tx_id, sale_ref, amount, verdict, now),
+            )
+        else:
+            db.execute(
+                "UPDATE payments SET subscriber = NULL, verdict = ?, days = 0, issued = 1 "
+                "WHERE event_id = ?",
+                (verdict, event_id),
+            )
+        return "refused"
+
     if amount < price_of(sku):
         # OBLIGATION 4. The component accepted this and was right to; a
         # component that judged prices would be a component that had to know
         # every host's prices. Refusing here is where it belongs.
-        db.execute(
-            "INSERT INTO payments (event_id, tx_id, sale_ref, amount, subscriber, verdict, days, seen_at, issued)"
-            " VALUES (?,?,?,?,?,?,0,?,1)",
-            (event_id, tx_id, sale_ref, amount, subscriber, "underpaid", now),
-        )
+        if existing_payment is None:
+            db.execute(
+                "INSERT INTO payments "
+                "(event_id, tx_id, sale_ref, amount, subscriber, verdict, days, seen_at, issued)"
+                " VALUES (?,?,?,?,?,?,0,?,1)",
+                (event_id, tx_id, sale_ref, amount, subscriber, "underpaid", now),
+            )
+        else:
+            db.execute(
+                "UPDATE payments SET verdict = 'underpaid', days = 0, issued = 1 "
+                "WHERE event_id = ?",
+                (event_id,),
+            )
         return "underpaid"
 
     row = db.execute(
@@ -434,12 +621,31 @@ def credit(db: sqlite3.Connection, event: dict, now: int) -> str:
         "total_paid = excluded.total_paid",
         (subscriber, horizon, total),
     )
-    db.execute(
-        "INSERT INTO payments (event_id, tx_id, sale_ref, amount, subscriber, verdict, days, seen_at, issued)"
-        " VALUES (?,?,?,?,?,?,?,?,0)",
-        (event_id, tx_id, sale_ref, amount, subscriber, "credited", days, now),
-    )
+    if existing_payment is None:
+        db.execute(
+            "INSERT INTO payments "
+            "(event_id, tx_id, sale_ref, amount, subscriber, verdict, days, seen_at, issued)"
+            " VALUES (?,?,?,?,?,?,?,?,0)",
+            (event_id, tx_id, sale_ref, amount, subscriber, "credited", days, now),
+        )
+    else:
+        db.execute(
+            "UPDATE payments SET subscriber = ?, verdict = 'credited', days = ?, issued = 0 "
+            "WHERE event_id = ?",
+            (subscriber, days, event_id),
+        )
     return "credited"
+
+
+def retry_unresolved(db: sqlite3.Connection, now: int) -> list[str]:
+    """Re-read every persisted event whose transaction outcome was unavailable."""
+    verdicts = []
+    rows = db.execute(
+        "SELECT event_id FROM payments WHERE verdict = 'unresolved' ORDER BY event_id"
+    ).fetchall()
+    for row in rows:
+        verdicts.append(credit(db, {"_id": row["event_id"]}, now))
+    return verdicts
 
 
 # --------------------------------------------------------------------------
@@ -488,7 +694,8 @@ def issue_pending(db: sqlite3.Connection, contract: str | None, epoch: int, now:
     """
     ports = ports or [7509]
     pending = db.execute(
-        "SELECT DISTINCT subscriber FROM payments WHERE issued = 0 AND subscriber IS NOT NULL"
+        "SELECT DISTINCT subscriber FROM payments "
+        "WHERE verdict = 'credited' AND issued = 0 AND subscriber IS NOT NULL"
     ).fetchall()
     if not pending:
         return 0
@@ -518,7 +725,8 @@ def issue_pending(db: sqlite3.Connection, contract: str | None, epoch: int, now:
     (RUN / "pending-delta.json").write_text(json.dumps(delta, separators=(",", ":")))
 
     db.execute(
-        "UPDATE payments SET issued = 1, issued_at = ? WHERE issued = 0 AND subscriber IS NOT NULL",
+        "UPDATE payments SET issued = 1, issued_at = ? "
+        "WHERE verdict = 'credited' AND issued = 0 AND subscriber IS NOT NULL",
         (now,),
     )
     return len(entitlements)
@@ -590,17 +798,28 @@ def cmd_watch(args) -> None:
 
     while True:
         at = cursor(db)
+        now = int(time.time())
+        counts: dict[str, int] = {}
+        for verdict in retry_unresolved(db, now):
+            counts[verdict] = counts.get(verdict, 0) + 1
         try:
             events = read_events(at)
         except Exception as exc:
-            print(f"indexer unavailable ({type(exc).__name__}); retrying")
+            # Transaction reads and the event stream are independent indexer
+            # requests. A recovered transaction must still be delivered even
+            # when this particular stream read fails.
+            issued = issue_pending(db, args.contract, args.epoch, now, args.node_port)
+            db.commit()
+            if counts or issued:
+                summary = ", ".join(f"{n} {v}" for v, n in sorted(counts.items()))
+                print(f"[{time.strftime('%H:%M:%S')}] cursor {at}->{at}  {summary}"
+                      + (f"  issued {issued}" if issued else ""))
+            print(f"indexer unavailable ({type(exc).__name__}: {exc}); retrying")
             if args.once:
                 return
             time.sleep(args.interval)
             continue
 
-        now = int(time.time())
-        counts: dict[str, int] = {}
         highest = at
         for event in events:
             verdict = credit(db, event, now)
@@ -653,10 +872,15 @@ def read_queue(contract: str, ports: list[int]) -> list[str]:
 def cmd_cover(args) -> None:
     """Pay for visitors who asked, up to a cap, and never the same one twice.
 
-    THE CAP IS THE POINT. This queue is unsigned and anyone may append to it,
-    which is what lets a stranger with no wallet ask at all. The house's
-    protection was never that the queue is trustworthy -- it is that the house
-    chooses, every sweep, how many strangers it feels like paying for.
+    TWO CAPS, AND ONE OF THEM WAS MISSING. This queue is unsigned and anyone may
+    append to it, which is what lets a stranger with no wallet ask at all. The
+    house's protection was never that the queue is trustworthy.
+
+    `--max` bounds ONE SWEEP. That is what this docstring used to claim was the
+    whole protection -- "the house chooses, every sweep, how many strangers it
+    feels like paying for" -- which is true of a sweep and false of a seller left
+    running, because `./catflix serve` sweeps forever. `--budget` is the
+    cumulative half, read from the ledger so a restart does not reset it.
     """
     db = open_ledger()
     now = int(time.time())
@@ -679,13 +903,30 @@ def cmd_cover(args) -> None:
     if not wanted:
         print("nothing in the queue that has not already been paid")
         return
-    print(f"{len(wanted)} unpaid request(s); covering at most {args.max}")
+    # THE CUMULATIVE CEILING, and it is checked against the ledger rather than
+    # counted in this process, so restarting the seller does not reset it.
+    spent = db.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS t FROM covered WHERE outcome = 'paid'"
+    ).fetchone()["t"]
+    budget = args.budget
+    if spent >= budget:
+        print(f"house budget exhausted: {spent:,} of {budget:,} uXTR already covered."
+              f" Raise --budget deliberately, or stop covering.")
+        return
+    print(f"{len(wanted)} unpaid request(s); covering at most {args.max};"
+          f" {spent:,} of {budget:,} uXTR spent")
 
     for reference in wanted[: args.max]:
         # The price is read from the reference, not from a flag: the visitor
         # chose what to order and the house pays for THAT, not for whatever
         # this sweep happened to be invoked with.
         amount = price_of(parse_reference(reference)[1])
+        # PER PAYMENT, not just per sweep: the ceiling must not be crossed by
+        # the last order in a sweep that started under it.
+        if spent + amount > budget:
+            print(f"  skipped {reference[:36]}...  {amount:,} uXTR would exceed"
+                  f" the {budget:,} uXTR house budget ({spent:,} spent)")
+            continue
         result = subprocess.run(
             [sys.executable, str(args.wallet), "pay", args.agent, COMPONENT, str(amount), reference],
             capture_output=True, text=True, timeout=600, cwd=str(Path(args.wallet).parent),
@@ -700,6 +941,8 @@ def cmd_cover(args) -> None:
             " VALUES (?,?,?,?,?)",
             (reference, amount if outcome == "paid" else 0, tx, outcome, now),
         )
+        if outcome == "paid":
+            spent += amount
         db.commit()
         print(f"  {outcome:8} {reference[:36]}...  {tx or result.stderr.strip()[:70]}")
 
@@ -756,6 +999,9 @@ def main() -> None:
     p.add_argument("--node-port", type=int, action="append", default=None,
                    help="a Freenet node to serve (repeatable; default 7509)")
     p.add_argument("--queue", required=True, help="the request queue contract key")
+    p.add_argument("--budget", type=int, default=HOUSE_BUDGET_MICROXTR,
+                   help="most the house will EVER spend covering strangers, in microXTR,"
+                        " measured across the whole ledger and not per sweep")
     p.add_argument("--agent", default="catflix-e2e", help="agent_wallet identity that pays")
     p.add_argument(
         "--wallet",

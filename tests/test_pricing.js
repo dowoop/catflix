@@ -4,18 +4,25 @@
 // actually refuses an underpayment, so its answer is the expected value and
 // the page's is what gets compared against it.
 import { priceOf } from "../ui/pricing.js";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const config = JSON.parse(readFileSync(new URL("../site/config.json", import.meta.url)));
 const skus = ["all", "t0", "t3", "t8", "m01", "m036", "m012345678", "m330", "m3"];
 
-const expected = JSON.parse(execFileSync("python3", ["-c", `
+const seller = spawnSync("python3", ["-c", `
 import sys, json
 sys.path.insert(0, "gatekeeper")
 import gatekeeper as G
 print(json.dumps({s: G.price_of(s) for s in ${JSON.stringify(skus)}}))
-`], { cwd: new URL("..", import.meta.url).pathname, encoding: "utf8" }));
+`], { cwd: new URL("..", import.meta.url).pathname, encoding: "utf8" });
+// Some managed runners return an EPERM diagnostic from spawnSync after the
+// child actually exited 0 and supplied its output. The status and JSON are the
+// evidence this gate needs; a missing/non-zero status still fails normally.
+if (seller.status !== 0) {
+  throw seller.error || new Error(seller.stderr || `seller exited ${seller.status}`);
+}
+const expected = JSON.parse(seller.stdout);
 
 let failed = 0;
 for (const sku of skus) {
